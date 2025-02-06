@@ -8,6 +8,49 @@ import pg from 'pg'
 
 import type { VercelPostgresAdapter } from './types.js'
 
+const connectWithReconnect = async function ({
+  adapter,
+  client,
+  reconnect = false,
+}: {
+  adapter: VercelPostgresAdapter
+  client: pg.Pool | VercelPool
+  reconnect?: boolean
+}) {
+  let result
+
+  if (!reconnect) {
+    result = await client.connect()
+  } else {
+    try {
+      result = await client.connect()
+    } catch (ignore) {
+      setTimeout(() => {
+        adapter.payload.logger.info('Reconnecting to postgres')
+        void connectWithReconnect({ adapter, client, reconnect: true })
+      }, 1000)
+    }
+  }
+
+  if (!result) {return}
+
+  // Handle both pg.Pool and VercelPool error events
+  result.on('error', (err) => {
+    try {
+      // Handle various connection errors
+      if (
+        err.code === 'ECONNRESET' ||
+        err.message?.includes('Connection terminated unexpectedly') ||
+        err.message?.includes('connection terminated')
+      ) {
+        void connectWithReconnect({ adapter, client, reconnect: true })
+      }
+    } catch (ignore) {
+      // swallow error
+    }
+  })
+}
+
 export const connect: Connect = async function connect(
   this: VercelPostgresAdapter,
   options = {
@@ -25,7 +68,6 @@ export const connect: Connect = async function connect(
 
   try {
     const logger = this.logger || false
-
     let client: pg.Pool | VercelPool
 
     const connectionString = this.poolOptions?.connectionString ?? process.env.POSTGRES_URL
@@ -44,6 +86,9 @@ export const connect: Connect = async function connect(
     } else {
       client = this.poolOptions ? new VercelPool(this.poolOptions) : sql
     }
+
+    // Initialize connection with reconnect logic
+    await connectWithReconnect({ adapter: this, client })
 
     // Passed the poolOptions if provided,
     // else have vercel/postgres detect the connection string from the environment
